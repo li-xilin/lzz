@@ -1,3 +1,25 @@
+/*
+ * Copyright (c) 2023 Li Xilin <lixilin@gmx.com>
+ *
+ * Permission is hereby granted, free of charge, to one person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 #include "lznt1.h"
 #include <ax/io.h>
 #include <ax/dir.h>
@@ -15,8 +37,8 @@
 #define TOKEN_DIR_BEGIN 1
 #define TOKEN_DIR_END 2
 
-#define COMPRESSED_BUF_SIZE 0x1000
-#define UNCOMPRESSED_BUF_SIZE 0x1000 - 2
+#define COMPRESSED_BUF_SIZE 4096 * 4
+#define UNCOMPRESSED_BUF_SIZE COMPRESSED_BUF_SIZE - 2 * 4
 
 static int write_file_entry(FILE *lzz_fp, const ax_uchar *path, bool is_dir)
 {
@@ -26,6 +48,7 @@ static int write_file_entry(FILE *lzz_fp, const ax_uchar *path, bool is_dir)
 	uint8_t token = is_dir
 		? TOKEN_DIR_BEGIN
 		: TOKEN_FILE;
+	uint8_t name_len;
 
 	ax_stat stat;
 	if (ax_stat_get(path, &stat)) {
@@ -35,11 +58,10 @@ static int write_file_entry(FILE *lzz_fp, const ax_uchar *path, bool is_dir)
 	else {
 		ftime = stat.st_mtim;
 	}
-
 	if (ax_ustr_utf8(ax_path_basename(path), utf8_name, sizeof utf8_name) == -1)
 		goto out;
 
-	uint8_t name_len = strlen(utf8_name);
+	name_len = strlen(utf8_name);
 
 	fwrite(&token, sizeof token, 1, lzz_fp);
 	fwrite(&ftime, sizeof ftime, 1, lzz_fp);
@@ -58,7 +80,9 @@ out:
 static int pack_file(FILE *lzz_fp, ax_uchar *path, size_t path_len)
 {
 	int retval = -1;
+
 	ax_printf(ax_u("%s\n"), path);
+
 	FILE *src_fp = ax_fopen(path, "r");
 	if (!src_fp) {
 		ax_pwarn("Failed to open file `%s': %s", path, strerror(errno));
@@ -104,6 +128,9 @@ static int pack_dir(FILE *lzz_fp, ax_uchar *path, size_t path_len)
 	int retval = -1;
 	ax_dir *dir = NULL;
 	ax_dirent *ent1;
+	uint32_t name_len;
+	char utf8_name[AX_FILENAME_MAX];
+	uint8_t token;
 
 	if (!(dir = ax_dir_open(path)))
 		goto out;
@@ -121,11 +148,10 @@ static int pack_dir(FILE *lzz_fp, ax_uchar *path, size_t path_len)
 		ax_ustrcpy(path + path_len, ax_u(AX_PATH_SEP));
 		ax_ustrcpy(path + path_len + 1, ent1->d_name);
 
-		char utf8_name[AX_FILENAME_MAX];
 		if (ax_ustr_utf8(ent1->d_name, utf8_name, sizeof utf8_name) == -1)
 			goto out;
 
-		uint32_t name_len = strlen(utf8_name);
+		name_len = strlen(utf8_name);
 		if (ent1->d_type == AX_DT_DIR) {
 			if (pack_dir(lzz_fp, path, path_len + 1 + name_len))
 				goto out;
@@ -137,7 +163,7 @@ static int pack_dir(FILE *lzz_fp, ax_uchar *path, size_t path_len)
 
 	};
 
-	uint8_t token = TOKEN_DIR_END;
+	token = TOKEN_DIR_END;
 	if (!fwrite(&token, sizeof token, 1, lzz_fp)) {
 		ax_perror("Failed to write file: %s", strerror(errno));
 		goto out;
@@ -155,18 +181,17 @@ int lzz_pack(const ax_uchar *const files[], const ax_uchar *lzz_filepath)
 	int retval = -1;
 	FILE *lzz_fp = NULL;
 	ax_uchar filepath[AX_PATH_MAX];
+	char magic[2] = { 'l', 'z' };
 
 	if (!(lzz_fp = ax_fopen(lzz_filepath, "wb"))) {
 		ax_perror("Failed to open file `%s': %s", lzz_filepath, strerror(errno));
 		goto out;
 	}
 	
-	char magic[2] = { 'l', 'z' };
 	if (!fwrite(magic, sizeof magic, 1, lzz_fp)) {
 		ax_perror("Failed to write lzz file: %s", strerror(errno));
 		goto out;
 	}
-
 
 	for (int i = 0; files[i]; i++) {
 		if (!ax_path_realize(files[i], filepath, AX_PATH_MAX)) {
@@ -264,13 +289,13 @@ static int extract_file(FILE *lzz_fp, ax_uchar *extract_filepath, uint32_t tim, 
 		if (!test && !fwrite(uncomp_buf, uncomp_size, 1, dst_fp))
 			goto out;
 	}
-	if (!test)
-		ax_sys_utime(extract_filepath, tim, tim);
 
 	retval = 0;
 out:
-	if (dst_fp)
+	if (dst_fp) {
 		fclose(dst_fp);
+		ax_sys_utime(extract_filepath, tim, tim);
+	}
 	return retval;
 }
 
@@ -304,6 +329,9 @@ static int unpack_file(FILE *lzz_fp, ax_uchar *path, size_t path_len, bool test)
 				ax_perror("Failed to create directory `%s': %s", path, strerror(errno));
 				goto out;
 			}
+
+			ax_sys_utime(path, tim, tim);
+
 			size_t name_len = ax_ustrlen(name_buf);
 			if (unpack_file(lzz_fp, path, path_len + name_len + 1, test))
 				goto out;
