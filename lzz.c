@@ -187,7 +187,7 @@ int lzz_pack(const ax_uchar *const files[], const ax_uchar *lzz_filepath)
 		ax_perror("Failed to open file `%s': %s", lzz_filepath, strerror(errno));
 		goto out;
 	}
-	
+
 	if (!fwrite(magic, sizeof magic, 1, lzz_fp)) {
 		ax_perror("Failed to write lzz file: %s", strerror(errno));
 		goto out;
@@ -240,7 +240,7 @@ static int read_file_entry(FILE *lzz_fp, ax_uchar *name, uint32_t *timp)
 		ax_perror("Failed to read lzz file: %s", strerror(errno));
 		goto out;
 	}
-	
+
 	if (!fread(utf8_name, name_len, 1, lzz_fp)) {
 		ax_perror("Failed to read lzz file: %s", strerror(errno));
 		goto out;
@@ -264,8 +264,11 @@ static int extract_file(FILE *lzz_fp, ax_uchar *extract_filepath, uint32_t tim, 
 
 	ax_printf(ax_u("%s\n"), extract_filepath);
 
-	if (!test && !(dst_fp = fopen(extract_filepath, "wb")))
-		goto out;
+	if (!test) {
+		if (!(dst_fp = fopen(extract_filepath, "wb"))) {
+			ax_pwarn("Failed to open file `%s': %s", extract_filepath, strerror(errno));
+		}
+	}
 
 	uint8_t rd_buf[COMPRESSED_BUF_SIZE];
 	uint8_t uncomp_buf[UNCOMPRESSED_BUF_SIZE];
@@ -280,21 +283,31 @@ static int extract_file(FILE *lzz_fp, ax_uchar *extract_filepath, uint32_t tim, 
 		if (!fread(rd_buf, comp_size, 1, lzz_fp))
 			goto out;
 
+		if (!dst_fp)
+			continue;
+
 		size_t uncomp_size = sizeof uncomp_buf;
 		if (lznt1_decompress(rd_buf, comp_size, uncomp_buf, &uncomp_size)) {
-			ax_perror("Failed to decompress data block, file is broken");
+			ax_perror("Failed to decompress data block: %s", strerror(errno));
 			goto out;
 		}
 
-		if (!test && !fwrite(uncomp_buf, uncomp_size, 1, dst_fp))
-			goto out;
+		if (!test && dst_fp)
+			fwrite(uncomp_buf, uncomp_size, 1, dst_fp);
 	}
+
+	if (!dst_fp || ferror(dst_fp))
+		ax_perror("Failed to write file `%s': %s", extract_filepath, strerror(errno));
 
 	retval = 0;
 out:
 	if (dst_fp) {
+
 		fclose(dst_fp);
 		ax_sys_utime(extract_filepath, tim, tim);
+	}
+	if (ferror(lzz_fp)) {
+		ax_perror("Failed to read LZZ file: %s", strerror(errno));
 	}
 	return retval;
 }
@@ -354,7 +367,7 @@ int lzz_unpack(const ax_uchar *lzz_filepath, const ax_uchar *target_path, bool t
 
 	if (!(lzz_fp = ax_fopen(lzz_filepath, "r")))
 		goto out;
-	
+
 	char magic[2];
 	if (!fread(magic, sizeof magic, 1, lzz_fp)) {
 		ax_perror("Read lzz file failed: %s", strerror(errno));
